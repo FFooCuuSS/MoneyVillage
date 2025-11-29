@@ -73,6 +73,8 @@ export default function Player() {
   const [amount, setAmount] = useState<number | ''>(10);
   const [msg, setMsg] = useState('');
 
+  const [playerName, setPlayerName] = useState(''); 
+
   // 라운드 상태 구독
   const [roundStatus, setRoundStatus] = useState<RoundStatus>('READY');
   const [roundEndsAt, setRoundEndsAt] = useState<Date | null>(null);
@@ -172,34 +174,47 @@ export default function Player() {
   // ==============================
   // 4) 참가자(Participant) 자산 구독
   // ==============================
+  const participantId = useMemo(() => {
+    if (!sessionId || !playerName.trim()) return '';
+    return `${sessionId}_${playerName.trim()}`;
+  }, [sessionId, playerName]);
+
   useEffect(() => {
-  if (!sessionId || !userId) return;
+    if (!participantId || !userId) return;
 
-  const pid = `${sessionId}_${userId}`;
-  const ref = doc(db, 'participants', pid);
+    const ref = doc(db, 'participants', participantId);
 
-  // 존재 여부 상관 없이 기본 필드 유지
-  setDoc(ref, {
-    sessionId,
-    userId,
-    asset: 150000,
-    stockHoldings: {},
-    realEstateHoldings: {},
-  }, { merge: true }).catch(console.error);
+    // 최초 생성 + merge 유지
+    setDoc(
+      ref,
+      {
+        authUid: userId,
+        playerName,
+        sessionId,
+        asset: 150000,
+        stockHoldings: {},
+        realEstateHoldings: {},
+        bankProducts: [],
+        questSolved: false,
+        questAnswers: Array(6).fill(''),
+      },
+      { merge: true }
+    ).catch(console.error);
 
   const unsub = onSnapshot(ref, d => {
-    const data = d.data();
-    if (!data) return;
-    setAsset(Number(data.asset ?? 10000));
-    setStockHoldings((data.stockHoldings ?? {}) as Record<string, number>);
-    setRealEstateHoldings((data.realEstateHoldings ?? {}) as Record<string, boolean>);
-    setBankProducts((data.bankProducts ?? []) as BankProduct[]);
-    setQuestSolved(Boolean(data.questSolved ?? false));
-    setQuestAnswers((data.questAnswers ?? Array(6).fill('')) as string[]);
-  });
+      const data = d.data();
+      if (!data) return;
 
-  return () => unsub();
-}, [sessionId, userId]);
+      setAsset(data.asset ?? 150000);
+      setStockHoldings(data.stockHoldings ?? {});
+      setRealEstateHoldings(data.realEstateHoldings ?? {});
+      setBankProducts(data.bankProducts ?? []);
+      setQuestSolved(Boolean(data.questSolved));
+      setQuestAnswers(data.questAnswers ?? Array(6).fill(''));
+    });
+
+    return () => unsub();
+  }, [participantId, userId]);
 
   // ==============================
   // 5) 부스 선택 ↔ 탭 동기화
@@ -231,53 +246,56 @@ export default function Player() {
   // 7) 단순 부스용 거래 기록 (노동/퀘스트/행운)
   // ==============================
   async function saveSimpleBoothTransaction() {
-  if (!sessionId || !userId) return;
+    if (!participantId) {
+      setMsg("이름을 먼저 입력하세요.");
+      return;
+    }
+    if (!sessionId || !userId) return;
 
-  const amt = Number(amount);
-  if (!Number.isFinite(amt) || amt <= 0) {
-    setMsg("금액은 0보다 커야 합니다.");
-    return;
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setMsg("금액은 0보다 커야 합니다.");
+      return;
+    }
+
+    try {
+      const ref = doc(db, 'participants', participantId);
+
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        const data = snap.data() || {};
+        const curAsset = Number(data.asset ?? 150000);
+
+        tx.set(
+          ref,
+          {
+            sessionId,
+            authUid: userId,
+            playerName,
+            asset: curAsset + amt,
+            stockHoldings: data.stockHoldings ?? {},
+            realEstateHoldings: data.realEstateHoldings ?? {},
+          },
+          { merge: true }
+        );
+      });
+
+      await addDoc(collection(db, 'transactions'), {
+        sessionId,
+        userId: playerName,
+        boothId,
+        amount: amt,
+        createdAt: serverTimestamp(),
+      });
+
+      setMsg("저장 완료");
+      setAmount('');
+
+    } catch (e: any) {
+      console.error(e);
+      setMsg("저장 실패: " + e.message);
+    }
   }
-
-  try {
-    const pid = `${sessionId}_${userId}`;
-    const partRef = doc(db, 'participants', pid);
-
-    // 1) 참가자 자산 업데이트 (asset += amt)
-    await runTransaction(db, async (tx) => {
-      const snap = await tx.get(partRef);
-      const data = snap.data() || {};
-      const curAsset = Number(data.asset ?? 10000);
-
-      tx.set(
-        partRef,
-        {
-          sessionId,
-          userId,
-          asset: curAsset + amt,
-          stockHoldings: data.stockHoldings ?? {},
-          realEstateHoldings: data.realEstateHoldings ?? {},
-        },
-        { merge: true }
-      );
-    });
-
-    // 2) 거래 로그 남기기
-    await addDoc(collection(db, 'transactions'), {
-      sessionId,
-      userId,
-      boothId,
-      amount: amt,
-      createdAt: serverTimestamp(),
-    });
-
-    setMsg('저장 완료');
-    setAmount('');
-  } catch (e: any) {
-    console.error(e);
-    setMsg(`저장 실패: ${e?.message ?? String(e)}`);
-  }
-}
 
   const saveDisabled = useMemo(
   () =>
@@ -294,10 +312,6 @@ export default function Player() {
   // ==============================
   // 8) 주식 / 부동산 매수·매도
   // ==============================
-  const participantId = useMemo(
-    () => (sessionId && userId ? `${sessionId}_${userId}` : ''),
-    [sessionId, userId]
-  );
 
   async function buyStock(name: string, price: number) {
   try {
@@ -305,7 +319,6 @@ export default function Player() {
     if (roundStatus !== 'RUNNING') throw new Error('라운드 중에만 거래 가능합니다.');
     if (asset < price) throw new Error('자산이 부족합니다.');
 
-    // 🔥 추가: 현재 보유량 확인 (5개 제한)
     const currentHold = stockHoldings[name] ?? 0;
     if (currentHold >= 5) {
       throw new Error('이 종목은 최대 5개까지만 보유할 수 있습니다.');
@@ -321,8 +334,6 @@ export default function Player() {
       if (curAsset < price) throw new Error('자산이 부족합니다.');
 
       const stocks: Record<string, number> = { ...(data.stockHoldings ?? {}) };
-
-      // 🔥 중복 안전장치 (트랜잭션 내부에서도 체크)
       const cur = stocks[name] ?? 0;
       if (cur >= 5) {
         throw new Error('이 종목은 최대 5개까지만 보유할 수 있습니다.');
@@ -330,147 +341,199 @@ export default function Player() {
 
       stocks[name] = cur + 1;
 
-      tx.set(partRef, {
-        sessionId,
-        userId,
-        asset: curAsset - price,
-        stockHoldings: stocks,
-      }, { merge: true });
+      tx.set(
+        partRef,
+        {
+          sessionId,
+          asset: curAsset - price,
+          stockHoldings: stocks,
+        },
+        { merge: true }
+      );
+    });
+
+    // 🔥 거래 로그 추가
+    await addDoc(collection(db, 'transactions'), {
+      sessionId,
+      userId: playerName,
+      boothId: 'stock',
+      amount: -price,
+      createdAt: serverTimestamp(),
     });
 
     setMsg(`${name} 1주 매수 완료`);
-  } catch (e:any) {
+  } catch (e: any) {
     console.error(e);
     setMsg(e?.message ?? '주식 매수 실패');
   }
 }
 
+
   async function sellStock(name: string, price: number) {
-    try {
-      if (!sessionId || !participantId) throw new Error('세션 없음');
-      if (roundStatus !== 'RUNNING') throw new Error('라운드 중에만 거래 가능합니다.');
-      if ((stockHoldings[name] ?? 0) <= 0) throw new Error('보유 수량이 없습니다.');
+  try {
+    if (!sessionId || !participantId) throw new Error('세션 없음');
+    if (roundStatus !== 'RUNNING') throw new Error('라운드 중에만 거래 가능합니다.');
+    if ((stockHoldings[name] ?? 0) <= 0) throw new Error('보유 수량이 없습니다.');
 
-      const partRef = doc(db, 'participants', participantId);
+    const partRef = doc(db, 'participants', participantId);
 
-      await runTransaction(db, async (tx) => {
-        const snap = await tx.get(partRef);
-        const data = snap.data() || {};
-        const stocks: Record<string, number> = { ...(data.stockHoldings ?? {}) };
-        const cur = stocks[name] ?? 0;
-        if (cur <= 0) throw new Error('보유 수량이 없습니다.');
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(partRef);
+      const data = snap.data() || {};
+      const stocks: Record<string, number> = { ...(data.stockHoldings ?? {}) };
+      const cur = stocks[name] ?? 0;
+      if (cur <= 0) throw new Error('보유 수량이 없습니다.');
 
-        const curAsset = Number(data.asset ?? 10000);
+      const curAsset = Number(data.asset ?? 10000);
 
-        stocks[name] = cur - 1;
+      stocks[name] = cur - 1;
 
-        tx.set(partRef, {
+      tx.set(
+        partRef,
+        {
           sessionId,
-          userId,
           asset: curAsset + price,
           stockHoldings: stocks,
-        }, { merge: true });
-      });
+        },
+        { merge: true }
+      );
+    });
 
-      setMsg(`${name} 1주 매도 완료`);
-    } catch (e:any) {
-      console.error(e);
-      setMsg(e?.message ?? '주식 매도 실패');
-    }
+    // 🔥 거래 로그 추가
+    await addDoc(collection(db, 'transactions'), {
+      sessionId,
+      userId: playerName,
+      boothId: 'stock',
+      amount: price,
+      createdAt: serverTimestamp(),
+    });
+
+    setMsg(`${name} 1주 매도 완료`);
+  } catch (e: any) {
+    console.error(e);
+    setMsg(e?.message ?? '주식 매도 실패');
   }
+}
+
 
   async function buyRealEstate(name: string, price: number) {
-    try {
-      if (!sessionId || !participantId) throw new Error('세션 없음');
-      if (roundStatus !== 'RUNNING') throw new Error('라운드 중에만 거래 가능합니다.');
+  try {
+    if (!sessionId || !participantId) throw new Error('세션 없음');
+    if (roundStatus !== 'RUNNING') throw new Error('라운드 중에만 거래 가능합니다.');
 
-      const sessionRef = doc(db, 'sessions', sessionId);
-      const partRef = doc(db, 'participants', participantId);
+    const sessionRef = doc(db, 'sessions', sessionId);
+    const partRef = doc(db, 'participants', participantId);
 
-      await runTransaction(db, async (tx) => {
-        const [sSnap, pSnap] = await Promise.all([
-          tx.get(sessionRef),
-          tx.get(partRef),
-        ]);
+    await runTransaction(db, async (tx) => {
+      const [sSnap, pSnap] = await Promise.all([
+        tx.get(sessionRef),
+        tx.get(partRef),
+      ]);
 
-        const sData = sSnap.data() || {};
-        const owners: Record<string, string | null> = { ...(sData.realEstateOwners ?? {}) };
+      const sData = sSnap.data() || {};
+      const owners: Record<string, string | null> = { ...(sData.realEstateOwners ?? {}) };
 
-        if (owners[name] && owners[name] !== userId) {
-          throw new Error('이미 다른 참가자가 구매한 매물입니다.');
-        }
+      if (owners[name] && owners[name] !== userId) {
+        throw new Error('이미 다른 참가자가 구매한 매물입니다.');
+      }
 
-        const pData = pSnap.data() || {};
-        const curAsset = Number(pData.asset ?? 10000);
-        if (curAsset < price) throw new Error('자산이 부족합니다.');
+      const pData = pSnap.data() || {};
+      const curAsset = Number(pData.asset ?? 10000);
+      if (curAsset < price) throw new Error('자산이 부족합니다.');
 
-        const holdings: Record<string, boolean> = { ...(pData.realEstateHoldings ?? {}) };
+      const holdings: Record<string, boolean> = { ...(pData.realEstateHoldings ?? {}) };
 
-        owners[name] = userId;
-        holdings[name] = true;
+      owners[name] = userId;
+      holdings[name] = true;
 
-        tx.set(sessionRef, { realEstateOwners: owners }, { merge: true });
-        tx.set(partRef, {
+      tx.set(sessionRef, { realEstateOwners: owners }, { merge: true });
+      tx.set(
+        partRef,
+        {
           sessionId,
-          userId,
           asset: curAsset - price,
           realEstateHoldings: holdings,
-        }, { merge: true });
-      });
+        },
+        { merge: true }
+      );
+    });
 
-      setMsg(`${name} 매입 완료`);
-    } catch (e:any) {
-      console.error(e);
-      setMsg(e?.message ?? '부동산 매입 실패');
-    }
+    // 🔥 거래 로그 추가
+    await addDoc(collection(db, 'transactions'), {
+      sessionId,
+      userId: playerName,
+      boothId: 'realestate',
+      amount: -price,
+      createdAt: serverTimestamp(),
+    });
+
+    setMsg(`${name} 매입 완료`);
+  } catch (e: any) {
+    console.error(e);
+    setMsg(e?.message ?? '부동산 매입 실패');
   }
+}
+
 
   async function sellRealEstate(name: string, price: number) {
-    try {
-      if (!sessionId || !participantId) throw new Error('세션 없음');
-      if (roundStatus !== 'RUNNING') throw new Error('라운드 중에만 거래 가능합니다.');
+  try {
+    if (!sessionId || !participantId) throw new Error('세션 없음');
+    if (roundStatus !== 'RUNNING') throw new Error('라운드 중에만 거래 가능합니다.');
 
-      const sessionRef = doc(db, 'sessions', sessionId);
-      const partRef = doc(db, 'participants', participantId);
+    const sessionRef = doc(db, 'sessions', sessionId);
+    const partRef = doc(db, 'participants', participantId);
 
-      await runTransaction(db, async (tx) => {
-        const [sSnap, pSnap] = await Promise.all([
-          tx.get(sessionRef),
-          tx.get(partRef),
-        ]);
+    await runTransaction(db, async (tx) => {
+      const [sSnap, pSnap] = await Promise.all([
+        tx.get(sessionRef),
+        tx.get(partRef),
+      ]);
 
-        const sData = sSnap.data() || {};
-        const owners: Record<string, string | null> = { ...(sData.realEstateOwners ?? {}) };
+      const sData = sSnap.data() || {};
+      const owners: Record<string, string | null> = { ...(sData.realEstateOwners ?? {}) };
 
-        if (owners[name] !== userId) {
-          throw new Error('이 매물의 소유자가 아닙니다.');
-        }
+      if (owners[name] !== userId) {
+        throw new Error('이 매물의 소유자가 아닙니다.');
+      }
 
-        const pData = pSnap.data() || {};
-        const holdings: Record<string, boolean> = { ...(pData.realEstateHoldings ?? {}) };
+      const pData = pSnap.data() || {};
+      const holdings: Record<string, boolean> = { ...(pData.realEstateHoldings ?? {}) };
 
-        if (!holdings[name]) throw new Error('보유 중인 매물이 아닙니다.');
+      if (!holdings[name]) throw new Error('보유 중인 매물이 아닙니다.');
 
-        const curAsset = Number(pData.asset ?? 10000);
+      const curAsset = Number(pData.asset ?? 10000);
 
-        owners[name] = null;
-        holdings[name] = false;
+      owners[name] = null;
+      holdings[name] = false;
 
-        tx.set(sessionRef, { realEstateOwners: owners }, { merge: true });
-        tx.set(partRef, {
+      tx.set(sessionRef, { realEstateOwners: owners }, { merge: true });
+      tx.set(
+        partRef,
+        {
           sessionId,
-          userId,
           asset: curAsset + price,
           realEstateHoldings: holdings,
-        }, { merge: true });
-      });
+        },
+        { merge: true }
+      );
+    });
 
-      setMsg(`${name} 매도 완료`);
-    } catch (e:any) {
-      console.error(e);
-      setMsg(e?.message ?? '부동산 매도 실패');
-    }
+    // 🔥 거래 로그 추가
+    await addDoc(collection(db, 'transactions'), {
+      sessionId,
+      userId: playerName,
+      boothId: 'realestate',
+      amount: price,
+      createdAt: serverTimestamp(),
+    });
+
+    setMsg(`${name} 매도 완료`);
+  } catch (e: any) {
+    console.error(e);
+    setMsg(e?.message ?? '부동산 매도 실패');
   }
+}
+
 // ==============================
 // 9) 은행 탭
 // ==============================
@@ -533,8 +596,15 @@ export default function Player() {
           asset: curAsset - amtNum,
           bankProducts: list,
           sessionId,
-          userId,
         }, { merge: true });
+      });
+
+      await addDoc(collection(db, 'transactions'), {
+        sessionId,
+        userId: playerName,
+        boothId: 'bank',
+        amount: -amtNum,
+        createdAt: serverTimestamp(),
       });
 
       setMsg('예금 신청 완료');
@@ -552,6 +622,8 @@ async function cancelBankProduct(id: string) {
   const partRef = doc(db, 'participants', participantId);
 
   try {
+    let principal = 0;   // 🔥 트랜잭션 바깥에서도 기록할 수 있게
+
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(partRef);
       const data = snap.data() || {};
@@ -563,9 +635,12 @@ async function cancelBankProduct(id: string) {
       const prod = list[idx];
       if (prod.canceled || prod.withdrawn) throw new Error('이미 종료된 상품');
 
-      // 중단 → 원금 그대로 돌려주기
+      // 🔥 원금 기록을 외부에서 쓰기 위해 저장
+      principal = prod.principal;
+
+      // 원금 반환
       const curAsset = Number(data.asset ?? 10000);
-      const newAsset = curAsset + prod.principal;
+      const newAsset = curAsset + principal;
 
       // 상품 상태 업데이트
       list[idx] = { ...prod, canceled: true };
@@ -576,6 +651,15 @@ async function cancelBankProduct(id: string) {
       }, { merge: true });
     });
 
+    // 🔥 트랜잭션 밖에서 안전하게 로그 기록
+    await addDoc(collection(db, 'transactions'), {
+      sessionId,
+      userId: playerName,
+      boothId: 'bank',
+      amount: principal,     // 원금 100% 반환
+      createdAt: serverTimestamp(),
+    });
+
     setMsg('예금 해지 완료');
   } catch (e: any) {
     console.error(e);
@@ -583,12 +667,15 @@ async function cancelBankProduct(id: string) {
   }
 }
 
+
 async function withdrawBankProduct(id: string) {
   if (!sessionId || !participantId) return;
 
   const partRef = doc(db, 'participants', participantId);
 
   try {
+    let reward = 0;
+
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(partRef);
       const data = snap.data() || {};
@@ -603,7 +690,8 @@ async function withdrawBankProduct(id: string) {
       const now = Date.now();
       if (now < prod.matureAt) throw new Error('아직 만기 아님');
 
-      const reward = Math.floor(prod.principal * prod.multiplier);
+      // 🔥 전액 수령 금액
+      reward = Math.floor(prod.principal * prod.multiplier);
 
       const curAsset = Number(data.asset ?? 10000);
 
@@ -615,12 +703,22 @@ async function withdrawBankProduct(id: string) {
       }, { merge: true });
     });
 
+    // 🔥 거래 로그(전액 기록)
+    await addDoc(collection(db, 'transactions'), {
+      sessionId,
+      userId: playerName,
+      boothId: 'bank',
+      amount: reward,
+      createdAt: serverTimestamp(),
+    });
+
     setMsg('만기 수령 완료');
   } catch (e: any) {
     console.error(e);
     setMsg(e.message ?? '수령 실패');
   }
 }
+
 
   useEffect(() => {
     if (!participantId) return;
@@ -673,30 +771,39 @@ async function withdrawBankProduct(id: string) {
   const partRef = doc(db, 'participants', participantId);
 
   try {
-    await runTransaction(db, async (tx) => {
-      const snap = await tx.get(partRef);
-      const data = snap.data() || {};
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(partRef);
+    const data = snap.data() || {};
 
-      const curAsset = Number(data.asset ?? 10000);
+    const curAsset = Number(data.asset ?? 10000);
 
-      tx.set(
-        partRef,
-        {
-          asset: curAsset + totalReward,
-          questSolved: true,        // 🔥 세션당 1회 제한
-          questAnswers: questAnswers,
-          sessionId,
-          userId
-        },
-        { merge: true }
-      );
-    });
+    tx.set(
+      partRef,
+      {
+        asset: curAsset + totalReward,
+        questSolved: true,
+        questAnswers: questAnswers,
+        sessionId,
+      },
+      { merge: true }
+    );
+  });
 
-    setMsg(`퀘스트 제출 완료! 보상: ${totalReward.toLocaleString()}원`);
-  } catch (e:any) {
-    console.error(e);
-    setMsg(e?.message ?? '퀘스트 제출 실패');
-  }
+  await addDoc(collection(db, 'transactions'), {
+    sessionId,
+    userId: playerName,
+    boothId: 'quest',
+    amount: totalReward,
+    createdAt: serverTimestamp(),
+  });
+
+  setMsg(`퀘스트 제출 완료! 보상: ${totalReward.toLocaleString()}원`);
+
+} catch (e:any) {
+  console.error(e);
+  setMsg(e?.message ?? '퀘스트 제출 실패');
+}
+
 }
 
 
@@ -726,6 +833,13 @@ async function withdrawBankProduct(id: string) {
             <input value={sessionId} onChange={(e) => setSessionId(e.target.value)} style={{ width: '100%' }} />
             <small style={{ color: '#888' }}>OPEN 세션 자동 연결. 필요 시 수동 변경 가능</small>
           </div>
+
+          <input
+            value={playerName}
+            onChange={(e) => setPlayerName(e.target.value)}
+            placeholder="이름 입력"
+            style={{ width: "100%" }}
+          />
 
           {/* 여기 게임용 ID UI는 네가 쓰던 버전 그대로 둬도 됨 */}
 

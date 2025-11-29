@@ -239,7 +239,7 @@ export default function Viewer() {
           {ranking.map((r, i) => (
             <tr key={r.userId} style={{ borderBottom: '1px solid #333' }}>
               <td style={{ padding: '8px', textAlign: 'left' }}>{i + 1}</td>
-              <td style={{ padding: '8px', textAlign: 'left' }}>{r.userId.slice(0, 6)}…</td>
+              <td style={{ padding: '8px', textAlign: 'left' }}>{r.userId}</td>
               <td style={{ padding: '8px', textAlign: 'right' }}>{r.total.toLocaleString()}</td>
               <td>{r.labor.toLocaleString()}</td>
               <td>{r.bank.toLocaleString()}</td>
